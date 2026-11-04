@@ -785,7 +785,7 @@ def verify(
             - In strict mode: Variables matter and sets are not comparable with tuples
             - In non-strict mode: Variables are matched by position and sets can be compared with tuples
         timeout_seconds: Maximum time in seconds to spend on any single comparison operation.
-            Defaults to 5 seconds. Any timeout seconds > 0 or not None will result in the function to raise a ValueError if it's called in a threaded environment.
+            Defaults to 5 seconds. POSIX main-thread calls use a signal alarm; calls from other threads and Windows use a subprocess worker.
         allow_set_relation_comp: Whether to allow set - relation (e.g 1 < x < 2 and (1, 2)) comparison. Defaults to False.
             - If True, set - relation comparison will be allowed in all cases.
             - If False, set - relation comparison will be allowed only if the prediction is a set.
@@ -854,15 +854,10 @@ def verify(
             return compare_single_extraction(g, t)
 
         except ValueError as e:
-            if str(e) == "signal only works in main thread of the main interpreter":
-                raise ValueError(
-                    "Math-Verify doesn't support threaded environment due to usage of signal.alarm() in timeout mechanism. If you need to run in multithreaded environment it's recommended to set the parsing_timeout=None, which will run without timeout (and signal handling). In this case you need to handle the timeouting yourself."
-                ) from e
+            if raise_on_error:
+                raise e from e
             else:
-                if raise_on_error:
-                    raise e from e
-                else:
-                    logger.debug("Error during comparison", exc_info=True)
+                logger.debug("Error during comparison", exc_info=True)
                 return False
         except Exception as e:
             #! Do not attempt to print out the g and t during handling of exception

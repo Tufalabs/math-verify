@@ -19,6 +19,19 @@ pip install math-verify[antlr4_13_2]
 
 We recommend always specifying the antlr4 runtime to avoid any potential issues.
 
+## Timeouts in the Tufalabs fork
+
+This fork applies CAVE's [threaded timeout patch](https://github.com/Tufalabs/cave/blob/0af2110c37a08e43563590a6bd2ec6dd507f7fa1/dev/patches/math-verify/timeout-worker.patch)
+to Math-Verify 0.9.0. Positive parsing and comparison timeouts use `SIGALRM` on
+the POSIX main thread and a subprocess worker on background threads or Windows.
+The subprocess is terminated and reaped on timeout; POSIX cleanup also terminates
+its process group on timeout or a worker crash. Calls remain synchronous, so
+async callers should use `asyncio.to_thread`.
+
+Timeouts apply to individual parsing/comparison operations, not the complete
+grading call. Cancelling an async caller does not immediately stop its thread.
+Native Windows validation is pending.
+
 ## Example Usage
 ```python
 from math_verify import parse, verify

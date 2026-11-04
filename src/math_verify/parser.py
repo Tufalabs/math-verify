@@ -672,7 +672,7 @@ def parse(
         extraction_mode (Literal["first_match", "any_match"], optional): Strategy for extracting matches. Defaults to "any_match".
             - "first_match": Stop after finding the first match
             - "any_match": Try to extract all possible matches, stops after first sucesful parsing attempt
-        parsing_timeout (int, optional): Maximum time in seconds to spend parsing each expression. Defaults to 3. Any timeout seconds > 0 or not None will result in the function to raise a ValueError if it's called in a threaded environment.
+        parsing_timeout (int, optional): Maximum time in seconds to spend parsing each expression. POSIX main-thread calls use a signal alarm; calls from other threads and Windows use a subprocess worker.
         raise_on_error (bool, optional): Whether to raise an exception if an error occurs during parsing or return an empty list. Defaults to False.
 
     Returns:
@@ -706,11 +706,6 @@ def parse(
             extraction_mode=extraction_mode,
         )
     except ValueError as e:
-        # Check if it's the signal error
-        if str(e) == "signal only works in main thread of the main interpreter":
-            raise ValueError(
-                "Math-Verify 'parse' function doesn't support threaded environment due to usage of signal.alarm() in timeout mechanism. If you need to run in multithreaded environment it's recommended to set the parsing_timeout=None, which will run without timeout (and signal handling). In this case you need to handle the timeouting yourself."
-            ) from e
         if raise_on_error:
             raise e from e
         else:

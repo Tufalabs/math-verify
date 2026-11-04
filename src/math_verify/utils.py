@@ -20,13 +20,83 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import functools
 import logging
 import os
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+
+import cloudpickle
 
 from math_verify.errors import TimeoutException
 
 TIMEOUT_WARNING_SHOWN = False
 logger = logging.getLogger(__name__)
+
+
+def _terminate_process(
+    process: subprocess.Popen, *, include_process_group: bool = False
+) -> None:
+    """Stop and reap a timeout worker with bounded waits."""
+    windows = sys.platform == "win32"
+    if (process.poll() is not None) and (not include_process_group):
+        return
+
+    if windows:
+        if process.poll() is None:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=0.5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    elif hasattr(os, "killpg"):
+        try:
+            termination_signal = (
+                signal.SIGKILL
+                if include_process_group and process.poll() is not None
+                else signal.SIGTERM
+            )
+            os.killpg(
+                process.pid,
+                termination_signal,
+            )
+        except OSError:
+            pass
+    else:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+    try:
+        process.wait(timeout=0.25)
+    except subprocess.TimeoutExpired:
+        pass
+
+    if not windows and hasattr(os, "killpg") and include_process_group:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    elif process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        logger.error("Unable to reap Math-Verify timeout worker %s", process.pid)
 
 
 def timeout(timeout_seconds: int | None = 10):  # noqa: C901
@@ -37,8 +107,8 @@ def timeout(timeout_seconds: int | None = 10):  # noqa: C901
             Defaults to 10 seconds.
 
     Notes:
-        On Unix systems, uses a signal-based alarm approach which is more efficient as it doesn't require spawning a new process.
-        On Windows systems, uses a multiprocessing-based approach since signal.alarm is not available. This will incur a huge performance penalty.
+        POSIX main-thread calls use a signal alarm. Calls from other threads
+        and Windows use a subprocess worker to enforce the timeout.
     """
     if timeout_seconds is None or timeout_seconds <= 0:
 
@@ -47,62 +117,77 @@ def timeout(timeout_seconds: int | None = 10):  # noqa: C901
 
         return no_timeout_decorator
 
-    if os.name == "posix":
-        # Unix-like approach: signal.alarm
-        import signal
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            main_thread_call = (os.name == "posix") and (
+                threading.current_thread() is threading.main_thread()
+            )
+            if main_thread_call:
 
-        def decorator(func):
-            def handler(signum, frame):
-                raise TimeoutException("Operation timed out!")
+                def handler(signum, frame):
+                    raise TimeoutException("Operation timed out!")
 
-            def wrapper(*args, **kwargs):
                 old_handler = signal.getsignal(signal.SIGALRM)
                 signal.signal(signal.SIGALRM, handler)
                 signal.alarm(timeout_seconds)
                 try:
                     return func(*args, **kwargs)
                 finally:
-                    # Cancel the alarm and restore previous handler
                     signal.alarm(0)
                     signal.signal(signal.SIGALRM, old_handler)
 
-            return wrapper
+            payload = cloudpickle.dumps((func, args, kwargs))
+            with tempfile.TemporaryDirectory(prefix="math-verify-timeout-") as tmp:
+                input_path = Path(tmp, "input.bin")
+                output_path = Path(tmp, "output.bin")
+                input_path.write_bytes(payload)
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        "math_verify.timeout_worker",
+                        str(input_path),
+                        str(output_path),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=(
+                        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                        if sys.platform == "win32"
+                        else 0
+                    ),
+                    start_new_session=sys.platform != "win32",
+                )
 
-        return decorator
+                completed = False
+                try:
+                    process.wait(timeout=timeout_seconds)
+                    completed = True
+                except subprocess.TimeoutExpired:
+                    raise TimeoutException("Operation timed out!") from None
+                finally:
+                    if (not completed) or process.returncode:
+                        _terminate_process(process, include_process_group=True)
 
-    else:
-        # Windows approach: use multiprocessing
-        from multiprocessing import Process, Queue
+                if process.returncode:
+                    raise RuntimeError(
+                        f"Timeout worker exited with code {process.returncode}"
+                    )
+                try:
+                    success, value = cloudpickle.loads(output_path.read_bytes())
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Timeout worker returned an invalid response"
+                    ) from exc
 
-        def decorator(func):
-            def wrapper(*args, **kwargs):
-                q = Queue()
-
-                def run_func(q, args, kwargs):
-                    try:
-                        result = func(*args, **kwargs)
-                        q.put((True, result))
-                    except Exception as e:
-                        q.put((False, e))
-
-                p = Process(target=run_func, args=(q, args, kwargs))
-                p.start()
-                p.join(timeout_seconds)
-
-                if p.is_alive():
-                    # Timeout: Terminate the process
-                    p.terminate()
-                    p.join()
-                    raise TimeoutException("Operation timed out!")
-
-                # If we got here, the process completed in time.
-                success, value = q.get()
                 if success:
                     return value
-                else:
-                    # The child raised an exception; re-raise it here
+                if isinstance(value, BaseException):
                     raise value
+                raise RuntimeError("Timeout worker returned an invalid exception")
 
-            return wrapper
+        return wrapper
 
-        return decorator
+    return decorator
