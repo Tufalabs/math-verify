@@ -20,7 +20,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from sympy.core.expr import UnevaluatedExpr
 import logging
 import re
 from dataclasses import dataclass, field, replace
@@ -31,9 +30,9 @@ from typing import Literal, Sequence
 import sympy
 from latex2sympy2_extended.latex2sympy2 import (
     NormalizationConfig,
+    convert_to_pct,
     latex2sympy,
     normalize_latex,
-    convert_to_pct,
 )
 from latex2sympy2_extended.sets import FiniteSet
 from sympy import Basic, MatrixBase, Number
@@ -114,8 +113,9 @@ ExtractionTarget = LatexExtractionConfig | ExprExtractionConfig | StringExtracti
 def lazy_string_regex(
     string_extraction_config: StringExtractionConfig,
 ) -> list[tuple[re.Pattern[str], int]]:
-    # First get indices to predict
-    string_keys = f"(?P<string_keys>{'|'.join([re.escape(i) for i in string_extraction_config.strings])})"
+    # Prefer a complete longer label when configured labels share a prefix.
+    labels = sorted(string_extraction_config.strings, key=len, reverse=True)
+    string_keys = f"(?P<string_keys>{'|'.join(map(re.escape, labels))})"
 
     # The strings are either surrounded with <space>**answer**., or '<space>answer.' or the same without the dot
     full_stop_re = r"\."
@@ -134,11 +134,13 @@ def lazy_string_regex(
 
     regexes = []
 
-    final_answer_prefixed_re = rf"(?i:final answer is)\:?\s*{string_keys}\.?\s?I hope"
+    final_answer_prefixed_re = (
+        rf"(?i:final answer is)\:?\s*{string_keys}(?!\w)\.?\s?I hope"
+    )
 
     # To allow stuff like "final answer is to your question"
     final_answer_prefixed_just_is = (
-        rf"(?i:final answer.{{0,100}}?)\s+is\:?\s*{string_keys}"
+        rf"(?i:final answer.{{0,100}}?)\s+is\:?\s*{string_keys}(?!\w)"
     )
     regexes.extend(
         [
@@ -705,21 +707,13 @@ def parse(
             fallback_mode=fallback_mode,
             extraction_mode=extraction_mode,
         )
-    except ValueError as e:
+    except TimeoutException:
         if raise_on_error:
-            raise e from e
-        else:
-            logger.debug(f"Error parsing: {pred}", exc_info=True)
-            return []
-    except Exception as e:
-        if raise_on_error:
-            raise e from e
-        else:
-            logger.debug(f"Error parsing: {pred}", exc_info=True)
+            raise TimeoutException("Timeout during parsing") from None
+        logger.warning("Timeout during parsing")
         return []
-    except TimeoutException as e:
+    except Exception as error:
         if raise_on_error:
-            raise TimeoutException(f"Timeout during parsing: {pred}") from e
-        else:
-            logger.warning(f"Timeout during parsing: {pred}")
+            raise
+        logger.debug("Error parsing (%s)", type(error).__name__)
         return []

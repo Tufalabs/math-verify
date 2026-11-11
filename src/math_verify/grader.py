@@ -34,26 +34,27 @@ from sympy import (
     Eq,
     Float,
     GreaterThan,
+    Integer,
     Interval,
     LessThan,
     MatrixBase,
     MatrixExpr,
     Mul,
+    Ne,
     Number,
-    Integer,
     Rational,
     Set,
     StrictGreaterThan,
     StrictLessThan,
     Symbol,
     Tuple,
+    UnevaluatedExpr,
     default_sort_key,
     nan,
     ordered,
     simplify,
     solve,
     zoo,
-    UnevaluatedExpr,
 )
 from sympy import FiniteSet as SympyFiniteSet
 from sympy.core.function import UndefinedFunction
@@ -73,6 +74,7 @@ INVERSE_RELATIONS = {
     StrictGreaterThan: StrictLessThan,
     StrictLessThan: StrictGreaterThan,
     Eq: Eq,
+    Ne: Ne,
 }
 
 
@@ -254,6 +256,10 @@ def sympy_deep_compare_set_and_tuple(
             gold_args = gold.args
             pred_args = pred.args
 
+        # Input order can include repeated elements that the set's length omits.
+        if len(gold_args) != len(pred_args):
+            return False
+
         return all(
             sympy_expr_eq(a, b, float_rounding, numeric_precision)
             for a, b in zip(gold_args, pred_args, strict=True)
@@ -324,6 +330,8 @@ def sympy_compare_relational(
     """
 
     if isinstance(gold, And) and isinstance(pred, And):
+        if len(gold._unsorted_args) != len(pred._unsorted_args):
+            return False
         return all(
             sympy_compare_relational(g, p, float_rounding, numeric_precision)
             for g, p in zip(gold._unsorted_args, pred._unsorted_args, strict=True)

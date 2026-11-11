@@ -57,6 +57,13 @@ The parser supports three main extraction targets:
 
 By default, the parser uses both LatexExtractionConfig and ExprExtractionConfig for maximum flexibility in extracting mathematical expressions from model outputs.
 
+Callers that have already isolated an answer can opt into the helpers in
+`math_verify.normalization`. Apply `normalize_math_presentation(text)` to
+remove display styles and unwrap whole styled numeric literals. If
+`prepare_standalone_math(text)` returns a string, pass it to `parse` with only
+`LatexExtractionConfig`. This includes an empty string for an unbalanced ASCII
+root. A return value of `None` leaves extraction up to the caller.
+
 ## Why Another Math Evaluator?
 
 Existing math evaluators often fail to correctly assess model outputs due to:
