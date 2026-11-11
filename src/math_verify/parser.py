@@ -35,7 +35,7 @@ from latex2sympy2_extended.latex2sympy2 import (
     normalize_latex,
 )
 from latex2sympy2_extended.sets import FiniteSet
-from sympy import Basic, MatrixBase, Number
+from sympy import Basic, MatrixBase, Number, SympifyError
 from sympy.parsing import parse_expr
 
 from math_verify.errors import TimeoutException
@@ -431,7 +431,11 @@ def extract_expr(match: re.Match) -> tuple[str | sympy.Expr | None, str]:
 
         decimal = decimal.replace(",", ".")
         number_str = f"{integer}{decimal}"
-        number = Number(number_str)
+        try:
+            number = Number(number_str)
+        except SympifyError:
+            # A rejected number, such as an over-limit integer, has no text fallback.
+            return None, ""
 
         if is_percentage:
             number = convert_to_pct(number)
