@@ -20,7 +20,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from sympy.core.expr import UnevaluatedExpr
 import logging
 import re
 from dataclasses import dataclass, field, replace
@@ -31,12 +30,12 @@ from typing import Literal, Sequence
 import sympy
 from latex2sympy2_extended.latex2sympy2 import (
     NormalizationConfig,
+    convert_to_pct,
     latex2sympy,
     normalize_latex,
-    convert_to_pct,
 )
 from latex2sympy2_extended.sets import FiniteSet
-from sympy import Basic, MatrixBase, Number
+from sympy import Basic, MatrixBase, Number, SympifyError
 from sympy.parsing import parse_expr
 
 from math_verify.errors import TimeoutException
@@ -114,8 +113,9 @@ ExtractionTarget = LatexExtractionConfig | ExprExtractionConfig | StringExtracti
 def lazy_string_regex(
     string_extraction_config: StringExtractionConfig,
 ) -> list[tuple[re.Pattern[str], int]]:
-    # First get indices to predict
-    string_keys = f"(?P<string_keys>{'|'.join([re.escape(i) for i in string_extraction_config.strings])})"
+    # Prefer a complete longer label when configured labels share a prefix.
+    labels = sorted(string_extraction_config.strings, key=len, reverse=True)
+    string_keys = f"(?P<string_keys>{'|'.join(map(re.escape, labels))})"
 
     # The strings are either surrounded with <space>**answer**., or '<space>answer.' or the same without the dot
     full_stop_re = r"\."
@@ -134,11 +134,13 @@ def lazy_string_regex(
 
     regexes = []
 
-    final_answer_prefixed_re = rf"(?i:final answer is)\:?\s*{string_keys}\.?\s?I hope"
+    final_answer_prefixed_re = (
+        rf"(?i:final answer is)\:?\s*{string_keys}(?!\w)\.?\s?I hope"
+    )
 
     # To allow stuff like "final answer is to your question"
     final_answer_prefixed_just_is = (
-        rf"(?i:final answer.{{0,100}}?)\s+is\:?\s*{string_keys}"
+        rf"(?i:final answer.{{0,100}}?)\s+is\:?\s*{string_keys}(?!\w)"
     )
     regexes.extend(
         [
@@ -429,7 +431,11 @@ def extract_expr(match: re.Match) -> tuple[str | sympy.Expr | None, str]:
 
         decimal = decimal.replace(",", ".")
         number_str = f"{integer}{decimal}"
-        number = Number(number_str)
+        try:
+            number = Number(number_str)
+        except SympifyError:
+            # A rejected number, such as an over-limit integer, has no text fallback.
+            return None, ""
 
         if is_percentage:
             number = convert_to_pct(number)
@@ -520,13 +526,15 @@ def extract_latex(
             latex_exprs.append(parsed_latex)
         except Exception:
             latex_exprs.append(None)
-            pass
 
     if not latex_exprs:
         return None, ""
 
-    # If we have multiple expressions and all of them are parsed, wrap them in a Tuple
-    if len(latex_exprs) > 1 and all(expr is not None for expr in latex_exprs):
+    if len(latex_exprs) > 1:
+        fallback = " and ".join(latex_strs)
+        if any(expr is None for expr in latex_exprs):
+            return None, fallback
+
         # To handle solution is: 1,2 and 3
         all_elements = []
         for expr in latex_exprs:
@@ -534,9 +542,8 @@ def extract_latex(
                 all_elements.extend(expr.args)
             else:
                 all_elements.append(expr)
-        return FiniteSet(*all_elements), " and ".join(latex_strs)
+        return FiniteSet(*all_elements), fallback
 
-    # Otherwise return the single expression
     return latex_exprs[0], latex_strs[0]
 
 
@@ -705,21 +712,13 @@ def parse(
             fallback_mode=fallback_mode,
             extraction_mode=extraction_mode,
         )
-    except ValueError as e:
+    except TimeoutException:
         if raise_on_error:
-            raise e from e
-        else:
-            logger.debug(f"Error parsing: {pred}", exc_info=True)
-            return []
-    except Exception as e:
-        if raise_on_error:
-            raise e from e
-        else:
-            logger.debug(f"Error parsing: {pred}", exc_info=True)
+            raise TimeoutException("Timeout during parsing") from None
+        logger.warning("Timeout during parsing")
         return []
-    except TimeoutException as e:
+    except Exception as error:
         if raise_on_error:
-            raise TimeoutException(f"Timeout during parsing: {pred}") from e
-        else:
-            logger.warning(f"Timeout during parsing: {pred}")
+            raise
+        logger.debug("Error parsing (%s)", type(error).__name__)
         return []

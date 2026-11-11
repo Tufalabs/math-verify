@@ -1,7 +1,8 @@
 ## Parser definition
 import logging
-from math_verify.errors import TimeoutException
 from typing import Callable, Optional, Sequence
+
+from math_verify.errors import TimeoutException
 from math_verify.grader import verify
 from math_verify.parser import ExprExtractionConfig, ExtractionTarget, parse
 from math_verify.utils import timeout
@@ -57,16 +58,11 @@ def math_metric(
         ]
         extracted_golds = [parse(gold, gold_extraction_target) for gold in golds]
 
-        # Assert on empty gold and warn on empty pred
-        if any(len(g) == 0 for g in extracted_golds):
-            raise ValueError(
-                f"No gold targets found for at least one gold. Gold: {golds}, Pred: {predictions}"
-            )
+        if not extracted_golds or any(not gold for gold in extracted_golds):
+            raise ValueError("No gold targets found for at least one gold.")
 
-        if all(len(p) == 0 for p in extracted_predictions):
-            logger.warning(
-                f"We did not manage to extract a prediction in the correct format. Gold: {golds}, Pred: {predictions}"
-            )
+        if not any(extracted_predictions):
+            logger.warning("Could not extract any of %d predictions.", len(predictions))
 
         # We have to use timeout because the sypmy to str conversion can be very slow
         str_preds = None
@@ -78,6 +74,9 @@ def math_metric(
             logger.warning(
                 "Timeout when adding extracted predictions and golds to specific"
             )
+
+        if not predictions:
+            return 0.0, str_preds
 
         return (
             aggregation_function(

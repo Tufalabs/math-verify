@@ -391,10 +391,11 @@ def test_latex_notation_math(gold, pred, expected):
             "$5 \\leq x$",
             1,
         ),
+        # Reject contradictory intermediate equalities
         (
             "$x = 11$",
             "$x = 5+5+1 = 7 =11$",
-            1,
+            0,
         ),
         (
             "$7 = 11a+c$",
@@ -404,7 +405,7 @@ def test_latex_notation_math(gold, pred, expected):
         # Test equation with intermediate steps
         (
             "$x = 11$",
-            "$x = 5+5+1 = 7 =11$",
+            "$x = 5+5+1 = 11$",
             1,
         ),
         # Test fraction with approximation

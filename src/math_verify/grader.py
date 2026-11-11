@@ -34,26 +34,27 @@ from sympy import (
     Eq,
     Float,
     GreaterThan,
+    Integer,
     Interval,
     LessThan,
     MatrixBase,
     MatrixExpr,
     Mul,
+    Ne,
     Number,
-    Integer,
     Rational,
     Set,
     StrictGreaterThan,
     StrictLessThan,
     Symbol,
     Tuple,
+    UnevaluatedExpr,
     default_sort_key,
     nan,
     ordered,
     simplify,
     solve,
     zoo,
-    UnevaluatedExpr,
 )
 from sympy import FiniteSet as SympyFiniteSet
 from sympy.core.function import UndefinedFunction
@@ -73,6 +74,7 @@ INVERSE_RELATIONS = {
     StrictGreaterThan: StrictLessThan,
     StrictLessThan: StrictGreaterThan,
     Eq: Eq,
+    Ne: Ne,
 }
 
 
@@ -254,6 +256,10 @@ def sympy_deep_compare_set_and_tuple(
             gold_args = gold.args
             pred_args = pred.args
 
+        # Input order can include repeated elements that the set's length omits.
+        if len(gold_args) != len(pred_args):
+            return False
+
         return all(
             sympy_expr_eq(a, b, float_rounding, numeric_precision)
             for a, b in zip(gold_args, pred_args, strict=True)
@@ -286,24 +292,62 @@ def sympy_compare_interval(
 def sympy_solve_and_compare(
     gold: Relational, pred: Relational, float_rounding: int, numeric_precision: int
 ) -> bool:
+    if isinstance(gold, Eq) and isinstance(pred, Eq):
+        variables = gold.free_symbols
+        if not variables or variables != pred.free_symbols:
+            return False
+
+        # For a single variable, solve can return just a sample of non-polynomial roots.
+        univariate = len(variables) == 1
+        if univariate and not all(
+            side.is_polynomial(*variables)
+            for equation in (gold, pred)
+            for side in (equation.lhs, equation.rhs)
+        ):
+            return False
+
+        try:
+            solved_gold, solved_pred = (
+                solve(equation, variables, dict=True, incomplete=False)
+                for equation in (gold, pred)
+            )
+        except NotImplementedError:
+            return False
+        if not solved_gold or len(solved_gold) != len(solved_pred):
+            return False
+
+        if univariate:
+            variable = next(iter(variables))
+            if any(
+                solution.keys() != variables or solution[variable].is_finite is not True
+                for solutions in (solved_gold, solved_pred)
+                for solution in solutions
+            ):
+                return False
+            return sympy_deep_compare_set_and_tuple(
+                SympyFiniteSet(*(solution[variable] for solution in solved_gold)),
+                SympyFiniteSet(*(solution[variable] for solution in solved_pred)),
+                float_rounding,
+                numeric_precision,
+            )
+
+        return all(
+            g
+            and g.keys() == p.keys()
+            and all(
+                sympy_expr_eq(value, p[var], float_rounding, numeric_precision)
+                for var, value in g.items()
+            )
+            for g, p in zip(
+                ordered(solved_gold, keys=sort_key, default=False),
+                ordered(solved_pred, keys=sort_key, default=False),
+                strict=True,
+            )
+        )
+
     solved_gold = list(ordered(solve(gold, gold.free_symbols)))
     solved_pred = list(ordered(solve(pred, pred.free_symbols)))
-    # Equalities should return list of dicts of solutions
-    if isinstance(gold, Eq) and isinstance(pred, Eq):
-        return all(
-            all(
-                g_k == p_k
-                and sympy_expr_eq(g_v, p_v, float_rounding, numeric_precision)
-                for (g_k, g_v), (p_k, p_v) in zip(
-                    sorted(g.items()), sorted(p.items()), strict=True
-                )
-            )
-            for g, p in zip(ordered(solved_gold, keys=sort_key, default=False), ordered(solved_pred, keys=sort_key, default=False), strict=True)
-        )
-    else:
-        return sympy_expr_eq(
-            solved_gold, solved_pred, float_rounding, numeric_precision
-        )
+    return sympy_expr_eq(solved_gold, solved_pred, float_rounding, numeric_precision)
 
 
 def sympy_compare_relational(
@@ -324,6 +368,8 @@ def sympy_compare_relational(
     """
 
     if isinstance(gold, And) and isinstance(pred, And):
+        if len(gold._unsorted_args) != len(pred._unsorted_args):
+            return False
         return all(
             sympy_compare_relational(g, p, float_rounding, numeric_precision)
             for g, p in zip(gold._unsorted_args, pred._unsorted_args, strict=True)
@@ -652,6 +698,24 @@ def sympy_expr_eq(
     is_pred_assignment = is_assignment_relation(pred)
     is_gold_equation = is_equation(gold)
     is_pred_equation = is_equation(pred)
+
+    # Check finite numeric links before collapsing a chain to its endpoints or RHS.
+    for expr, equation in ((gold, is_gold_equation), (pred, is_pred_equation)):
+        if (
+            isinstance(expr, And)
+            and equation
+            and any(
+                isinstance(link.lhs, Number)
+                and isinstance(link.rhs, Number)
+                and link.lhs.is_finite is True
+                and link.rhs.is_finite is True
+                and not sympy_expr_eq(
+                    link.lhs, link.rhs, float_rounding, numeric_precision
+                )
+                for link in expr._unsorted_args
+            )
+        ):
+            return False
 
     # Truncate equations chains in case of assignment, this doesn't change any of the above values,
     # so no need to recompute them
