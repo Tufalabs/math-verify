@@ -522,13 +522,15 @@ def extract_latex(
             latex_exprs.append(parsed_latex)
         except Exception:
             latex_exprs.append(None)
-            pass
 
     if not latex_exprs:
         return None, ""
 
-    # If we have multiple expressions and all of them are parsed, wrap them in a Tuple
-    if len(latex_exprs) > 1 and all(expr is not None for expr in latex_exprs):
+    if len(latex_exprs) > 1:
+        fallback = " and ".join(latex_strs)
+        if any(expr is None for expr in latex_exprs):
+            return None, fallback
+
         # To handle solution is: 1,2 and 3
         all_elements = []
         for expr in latex_exprs:
@@ -536,9 +538,8 @@ def extract_latex(
                 all_elements.extend(expr.args)
             else:
                 all_elements.append(expr)
-        return FiniteSet(*all_elements), " and ".join(latex_strs)
+        return FiniteSet(*all_elements), fallback
 
-    # Otherwise return the single expression
     return latex_exprs[0], latex_strs[0]
 
 
